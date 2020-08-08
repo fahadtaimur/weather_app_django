@@ -1,0 +1,10 @@
+{% extends 'base.html' %}
+{% block content %}
+    {% for k, v in api.current.items %}
+        {{ k }}: {{ v }}<br>
+    {% endfor %}
+
+    <br><br>
+
+{% endblock %}
+
