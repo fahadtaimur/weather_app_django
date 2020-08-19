@@ -1,0 +1,386 @@
+---
+title: "FoodTruckRegression.RMD"
+author: "Fahad Taimur"
+date: "7/27/2020"
+output: 
+  html_document:
+    df_print: paged
+    theme: flatly
+    highlight: tango
+    toc: yes
+    toc_depth: 2
+    toc_float: true
+    number_sections: no
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE, 
+  message= FALSE, 
+  warning= FALSE,
+  out.width = "100%",
+  out.height = "100%",
+  dpi = 300)
+```
+
+# Libraries
+```{r}
+library(readxl)
+library(tidyverse)
+library(tidymodels)
+
+data <- read_excel("data_file.xlsx") %>% janitor::clean_names();
+data %>%
+  mutate(month = lubridate::month(date), 
+         quarter = lubridate::quarter(date)) %>%
+  mutate(rain = case_when(
+    probability_of_precipitation >= 0.5 ~ 1,
+    TRUE ~ 0
+  ))-> data; data
+```
+
+# Data Analysis
+
+# Summary Statistics
+```{r}
+data %>%
+  skimr::skim()
+```
+
+## Mean / Max / Min (In Order) Variable by City
+```{r}
+# Mean
+data %>%
+  select(city, quantity_sold, probability_of_precipitation, travel_in_km_t_and_from, liters_required, 
+         fuel_in, parking, travel_cost, food_cost, median_age, median_total_income, price, revenue, profit) %>%
+  group_by(city) %>%
+  summarise_at(vars(quantity_sold:profit), funs(mean(., na.rm = T))) %>%
+  arrange(desc(profit))
+
+# Max
+data %>%
+  select(city, quantity_sold, probability_of_precipitation, travel_in_km_t_and_from, liters_required, 
+         fuel_in, parking, travel_cost, food_cost, median_age, median_total_income, price, revenue, profit) %>%
+  group_by(city) %>%
+  summarise_at(vars(quantity_sold:profit), funs(max(., na.rm = T))) %>%
+  arrange(desc(profit))
+
+# Min
+data %>%
+  select(city, quantity_sold, probability_of_precipitation, travel_in_km_t_and_from, liters_required, 
+         fuel_in, parking, travel_cost, food_cost, median_age, median_total_income, price, revenue, profit) %>%
+  group_by(city) %>%
+  summarise_at(vars(quantity_sold:profit), funs(min(., na.rm = T))) %>%
+  arrange(desc(profit))
+```
+
+# Time Series
+```{r fig.width=10}
+plotly::ggplotly(
+  data %>%
+    select(date, quantity_sold) %>%
+    ggplot(aes(x=date, y=quantity_sold)) + 
+    geom_line() +
+    theme_bw() +
+    geom_smooth(method = "loess", span=0.1, se=FALSE)
+)
+```
+
+# Outlier Detection
+```{r fig.width=8}
+data %>%
+  group_by(city) %>%
+  summarise(mean_sales = mean(quantity_sold), 
+            std_sales = sd(quantity_sold)) %>%
+  inner_join(data, by = "city") %>%
+  arrange(date) %>%
+  mutate(z_score = (quantity_sold-mean_sales)/std_sales) -> data_mod; data_mod
+
+plotly::ggplotly(
+data_mod %>%
+  select(city, quantity_sold, z_score) %>%
+  ggplot(aes(x=quantity_sold, y=z_score, color=city)) +
+  geom_point() + 
+  theme_bw() +
+  facet_grid(~city)
+)
+```
+
+
+# Price Variation by City
+```{r}
+(data %>%
+  mutate(city = as_factor(city) %>%
+           fct_reorder(.x=price, .fun=max) %>%
+           fct_rev()) %>%
+  ggplot(aes(price, fill=city)) + 
+  geom_boxplot() + 
+  coord_flip() + 
+  theme_bw())
+
+data %>%
+  mutate(city = as_factor(city) %>% 
+           fct_reorder(.x = quantity_sold,.fun = median) 
+         %>% fct_rev()) %>%
+  ggplot(aes(quantity_sold, fill=city)) + 
+  geom_boxplot() + 
+  coord_flip() + 
+  theme_bw()
+```
+
+# Price vs. Quantity
+```{r}
+data %>%
+  select(city, price, quantity_sold) %>%
+  ggplot(aes(price, quantity_sold, color=city)) + 
+  geom_point() +
+  facet_grid(~city) + 
+  theme_bw()-> g
+
+plotly::ggplotly(g)
+
+data %>%
+  select(city, price, profit) %>%
+  ggplot(aes(price, profit, color=city)) + 
+  geom_point() +
+  facet_grid(~city) + 
+  theme_bw()-> g
+
+plotly::ggplotly(g)
+
+data %>%
+  select(city, quantity_sold, profit) %>%
+  ggplot(aes(quantity_sold, profit, color=city)) + 
+  geom_point() +
+  facet_grid(~city) + 
+  theme_bw()-> g
+
+plotly::ggplotly(g)
+```
+
+```{r}
+data %>%
+  select(city, price, quantity_sold) %>%
+  group_by(city, price) %>%
+  summarise(mean_qty = mean(quantity_sold), 
+            max_qty = max(quantity_sold), 
+            min_qty = min(quantity_sold)) -> mean_qty_price; mean_qty_price
+
+data %>%
+  ggplot(aes(price, quantity_sold)) +
+  geom_line() + 
+  facet_grid(~ city)
+
+mean_qty_price %>%
+  ggplot(aes(price, mean_qty)) +
+  geom_line() + 
+  facet_grid(~ city)
+```
+
+
+# Modeling Section
+
+## Split / Recipe
+```{r}
+lm_data <- data %>%
+  select(quantity_sold, price, probability_of_precipitation, temperature, festival, weekday, city, month, quarter, rain)
+
+split_obj <- rsample::initial_split(lm_data, prop = 0.90)
+train <- split_obj %>% training()
+test <- split_obj %>% testing()
+  
+# recipe
+recipe(quantity_sold ~ ., lm_data) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  #step_dummy(all_nominal(), -all_outcomes()) %>%
+  prep() -> recipe_obj
+
+# baking
+train <- bake(recipe_obj, new_data = train)
+test <- bake(recipe_obj, new_data = test)
+```
+
+# Tornto Regression
+```{r}
+city_name <- "Toronto"
+
+lm_data %>%
+  filter(city %in% c(city_name)) %>% select(-city, -temperature, -month, -quarter, -probability_of_precipitation) -> city_data
+
+# Revenue
+linear_reg(mode = "regression", penalty = NULL, mixture = NULL) %>%
+  set_engine("lm") %>%
+  fit(quantity_sold ~ ., data= data) -> lm_model
+
+summary(lm_model$fit)
+
+
+tidy(lm_model) %>%  
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"), round, 4) %>%
+  arrange((p.value))
+```
+
+# Hamilton Regression
+```{r}
+city_name <- "Hamilton"
+
+lm_data %>%
+  filter(city %in% c(city_name)) %>% select(-city, -temperature, -weekday) -> city_data
+
+linear_reg(mode = "regression", penalty = NULL, mixture = NULL) %>%
+  set_engine("lm") %>%
+  fit(quantity_sold ~ ., data= city_data) -> lm_model
+
+lm_model$fit
+
+summary(lm_model$fit)
+
+tidy(lm_model) %>%  
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"), round, 4) %>%
+  arrange((p.value))
+```
+
+# London Regression
+```{r}
+city_name <- "London"
+
+lm_data %>%
+  filter(city %in% c(city_name)) %>% select(-city, -probability_of_precipitation, -temperature) -> city_data
+
+linear_reg(mode = "regression", penalty = NULL, mixture = NULL) %>%
+  set_engine("lm") %>%
+  fit(quantity_sold ~ ., data= city_data) -> lm_model
+
+summary(lm_model$fit)
+
+tidy(lm_model) %>%  
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"), round, 4) %>%
+  arrange((p.value))
+```
+
+# Waterloo Regression
+```{r}
+city_name <- "Waterloo"
+
+lm_data %>%
+  filter(city %in% c(city_name)) %>% select(-city, -weekday) -> city_data
+
+# Revenue
+linear_reg(mode = "regression", penalty = NULL, mixture = NULL) %>%
+  set_engine("lm") %>%
+  fit(quantity_sold ~ ., data= city_data) -> lm_model
+
+summary(lm_model$fit)
+
+tidy(lm_model) %>%  
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"), round, 4) %>%
+  arrange((p.value))
+```
+
+# Random Forest
+```{r}
+library(ranger)
+library(yardstick)
+
+rf_data <-  read_excel("data_file.xlsx") %>% janitor::clean_names(); rf_data
+
+rf_data %>%
+  select(-(london:hamilton), -date) %>%
+  select(travel=travel_in_km_t_and_from, liters=liters_required, fuel=fuel_in, parking, travel_cost, food_cost, median_age, median_total_income, everything()) %>%
+  mutate(
+    travel = as.factor(travel),
+    liters = as.factor(liters),
+    fuel = as.factor(fuel),
+    parking = as.factor(parking),
+    travel_cost = as.factor(travel_cost),
+    median_age = as.factor(median_age),
+    median_total_income = as.factor(median_total_income)
+  ) -> rf_data; rf_data
+
+split_obj <- rsample::initial_split(rf_data, prop = 0.90)
+train <- split_obj %>% training()
+test <- split_obj %>% testing()
+  
+# recipe
+recipe(revenue ~ ., rf_data) %>%
+  step_zv(all_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  prep() -> recipe_obj
+
+# baking
+train <- bake(recipe_obj, new_data = train)
+test <- bake(recipe_obj, new_data = test)
+
+rand_forest(mode = "regression", mtry = 4, trees = 10, min_n = 10) %>%
+  set_engine("ranger", replace = T, importance = "impurity") %>%
+  fit(profit ~ ., train) -> rf_model
+
+rf_model %>%
+  predict(test) %>%
+  bind_cols(revenue = test$revenue) %>%
+  metrics(truth = revenue, estimate = .pred)
+
+rf_model$fit %>% 
+  ranger::importance() %>%
+  # convert vector to a data frame
+  enframe() %>%
+  arrange(desc(value)) %>%
+  head(25) %>%
+  mutate(name = name %>% as_factor() %>% fct_rev()) %>%
+  ggplot(aes(value, name)) + 
+  geom_point() + 
+  labs(
+    title = "RF - Top 20 Important Variables"
+  ) + 
+  theme_bw()
+```
+
+# Demand vs. Pricing
+```{r}
+data %>%
+  select(price, quantity_sold, city) %>%
+  ggplot(aes(price, quantity_sold)) +
+  geom_point() + 
+  facet_grid(~city) +
+  geom_smooth(method = "loess", se = FALSE) + 
+  theme_bw()
+
+?loess
+
+data %>%
+  select(price, quantity_sold, city) %>%
+  mutate(city = as.factor(city)) %>%
+  mutate(city = as.numeric(city)) %>%
+  loess(quantity_sold ~ price, data=.) -> qty_loess; qty_loess
+
+# To get fitted values
+#qty_loess$fitted
+
+qty_loess %>%
+  broom::augment()
+
+# Plot of loess
+qty_loess %>%
+  broom::augment() %>%
+  ggplot(aes(price, quantity_sold)) +
+  geom_point() +
+  geom_line(aes(y = .fitted)) + 
+  facet_grid(~city) +
+  theme_bw()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
